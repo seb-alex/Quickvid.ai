@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Backend local env and runtime artifacts
+backend/venv/
+backend/static/videos/*.mp4
+
+# Local exploratory artifacts
+backend/api_view*.txt
+backend/test_gen*.txt
+backend/check_api.py
+
+# Frontend
+frontend/node_modules/
+
+# OS/editor
+.DS_Store
+.vscode/

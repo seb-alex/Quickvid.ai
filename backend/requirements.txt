@@ -1,2 +1,6 @@
 fastapi
 uvicorn
+gradio_client
+python-multipart
+imageio-ffmpeg
+supabase
