@@ -68,6 +68,100 @@ main {
   color: var(--muted);
 }
 
+/* Mode toggle */
+.mode-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: #0f131b;
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.mode-btn:hover:not(:disabled):not(.active) {
+  background: #1b1f27;
+  color: var(--text);
+}
+
+.mode-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Image upload */
+.image-upload-area {
+  margin: 0.25rem 0;
+}
+
+.image-dropzone {
+  border: 2px dashed var(--card-border);
+  border-radius: 10px;
+  padding: 2.5rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+  background: #0f131b;
+}
+
+.image-dropzone:hover {
+  border-color: var(--primary);
+}
+
+.image-dropzone p {
+  margin: 0.25rem 0;
+}
+
+.image-preview-container {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+}
+
+.image-preview {
+  width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  display: block;
+}
+
+.clear-image-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.clear-image-btn:hover:not(:disabled) {
+  background: var(--danger);
+}
+
+.clear-image-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 textarea,
 .inline-input,
 select.inline-input {
