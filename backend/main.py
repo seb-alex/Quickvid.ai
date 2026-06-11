@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import uuid
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from gradio_client import Client as GradioClient, handle_file
@@ -40,11 +40,17 @@ app.add_middleware(
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 VIDEO_DIR = STATIC_DIR / "videos"
+UPLOAD_DIR = STATIC_DIR / "uploads"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 HF_SPACE_ID = os.getenv("HF_SPACE_ID", "ByteDance/AnimateDiff-Lightning")
 HF_API_NAME = os.getenv("HF_API_NAME", "/generate_image")
+
+# Image-to-Video space (Wan2.1 recommended by research)
+IMG2VID_SPACE_ID = os.getenv("IMG2VID_SPACE_ID", "multimodalart/Wan2.1-Fast")
+IMG2VID_API_NAME = os.getenv("IMG2VID_API_NAME", "/predict")
 
 # Optional enhancement models
 MUSIC_SPACE_ID = os.getenv("MUSIC_SPACE_ID", "facebook/MusicGen")
@@ -389,6 +395,62 @@ async def generate_video(
     return VideoResponse(job_id=job_id, status="processing", video_url=None)
 
 
+@app.post("/generate-from-image", response_model=VideoResponse)
+async def generate_video_from_image(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    prompt: str = Form(default=""),
+    add_music: bool = Form(default=False),
+    music_prompt: Optional[str] = Form(default=None),
+    upscale: bool = Form(default=False),
+    upscale_factor: str = Form(default="2x"),
+) -> VideoResponse:
+    # Validate image upload
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No image file provided")
+
+    allowed_types = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported image format '{ext}'. Allowed: {', '.join(allowed_types)}",
+        )
+
+    job_id = str(uuid.uuid4())
+
+    # Save uploaded image to temp location
+    image_ext = ext or ".png"
+    upload_filename = f"{job_id}{image_ext}"
+    upload_path = UPLOAD_DIR / upload_filename
+    content = await file.read()
+    upload_path.write_bytes(content)
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "processing",
+            "video_url": None,
+            "error": None,
+            "prompt": prompt or "Generate a video from this image",
+            "created_at": utc_now_iso(),
+            "music_added": False,
+            "upscaled": False,
+            "warnings": [],
+        }
+
+    background_tasks.add_task(
+        process_image_video,
+        job_id,
+        str(upload_path),
+        prompt or "Generate a video from this image",
+        add_music,
+        music_prompt,
+        upscale,
+        upscale_factor,
+    )
+    return VideoResponse(job_id=job_id, status="processing", video_url=None)
+
+
 @app.get("/status/{job_id}", response_model=VideoResponse)
 async def get_status(job_id: str) -> VideoResponse:
     with jobs_lock:
@@ -512,6 +574,101 @@ def process_video(
 
     except Exception as exc:
         logger.error("Error processing job %s: %s", job_id, exc, exc_info=True)
+        update_job(job_id, status="failed", error=str(exc), warnings=warnings, completed_at=utc_now_iso())
+
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def process_image_video(
+    job_id: str,
+    image_path: str,
+    prompt: str,
+    add_music: bool,
+    music_prompt: Optional[str],
+    upscale: bool,
+    upscale_factor: str,
+) -> None:
+    work_dir = Path(tempfile.mkdtemp(prefix=f"quickvid-img-{job_id}-"))
+    warnings: List[str] = []
+
+    try:
+        logger.info("Processing image-to-video job %s with prompt: %s", job_id, prompt)
+
+        # 1) Base generation via Wan2.1 (image + prompt)
+        img_client = GradioClient(IMG2VID_SPACE_ID)
+        result = img_client.predict(
+            image=handle_file(image_path),
+            prompt=prompt,
+            negative_prompt="blurry, low quality, distorted",
+            seed=42,
+            api_name=IMG2VID_API_NAME,
+        )
+        logger.info("Image-to-video Gradio result for %s: %s", job_id, result)
+
+        working_video_path = extract_local_path(result, {".mp4", ".webm", ".mov"})
+        if not working_video_path:
+            raise RuntimeError("Unable to locate generated video file in Gradio output")
+
+        music_added = False
+        upscaled = False
+
+        # 2) Optional AI music generation + merge
+        if add_music:
+            track_prompt = (music_prompt or f"cinematic background music for: {prompt}").strip()
+            generated_music_path, music_warning = generate_music_track(track_prompt, work_dir)
+            if music_warning:
+                warnings.append(music_warning)
+
+            mixed_video = work_dir / "video-with-music.mp4"
+            working_video_path = merge_audio_into_video(
+                working_video_path, generated_music_path, mixed_video
+            )
+            music_added = True
+
+        # 3) Optional upscaling
+        if upscale:
+            working_video_path, upscale_warning = upscale_with_fallback(
+                working_video_path, upscale_factor, work_dir
+            )
+            if upscale_warning:
+                warnings.append(upscale_warning)
+            upscaled = True
+
+        # 4) Persist final file locally (cache/fallback)
+        local_filename = f"{job_id}.mp4"
+        destination_path = VIDEO_DIR / local_filename
+        shutil.copy(working_video_path, destination_path)
+
+        # 5) Push to Supabase (primary in production)
+        final_video_url = f"/static/videos/{local_filename}"
+        if supabase:
+            try:
+                final_video_url = upload_video_to_supabase(destination_path, local_filename)
+            except Exception as exc:
+                warning = f"Supabase upload failed ({exc}); served from local storage fallback."
+                warnings.append(warning)
+                logger.warning(warning)
+
+        # Clean up uploaded image
+        try:
+            Path(image_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        update_job(
+            job_id,
+            status="completed",
+            video_url=final_video_url,
+            music_added=music_added,
+            upscaled=upscaled,
+            warnings=warnings,
+            completed_at=utc_now_iso(),
+        )
+        logger.info("Image-to-video job %s completed. Final URL: %s", job_id, final_video_url)
+
+    except Exception as exc:
+        logger.error("Error processing image-to-video job %s: %s", job_id, exc, exc_info=True)
         update_job(job_id, status="failed", error=str(exc), warnings=warnings, completed_at=utc_now_iso())
 
     finally:

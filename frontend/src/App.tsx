@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type JobStatus = 'idle' | 'processing' | 'completed' | 'failed'
 type UpscaleFactor = '2x' | '4x'
+type GenerationMode = 'text' | 'image'
 
 interface GenerateResponse {
   job_id: string
@@ -36,7 +37,12 @@ const mediaUrl = (url: string) => {
 }
 
 function App() {
+  const [mode, setMode] = useState<GenerationMode>('text')
   const [prompt, setPrompt] = useState('')
+  const [imageFile, setImageFile] = useState<File | null>(null)
+  const [imagePreview, setImagePreview] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   const [jobId, setJobId] = useState<string | null>(null)
   const [status, setStatus] = useState<JobStatus>('idle')
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
@@ -71,9 +77,30 @@ function App() {
     }
   }
 
+  const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setImageFile(file)
+    const reader = new FileReader()
+    reader.onload = () => setImagePreview(reader.result as string)
+    reader.readAsDataURL(file)
+  }
+
+  const handleClearImage = () => {
+    setImageFile(null)
+    setImagePreview(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
+
   const handleGenerate = async () => {
     const cleanPrompt = prompt.trim()
-    if (!cleanPrompt || isGenerating) return
+    if (isGenerating) return
+
+    if (mode === 'text' && !cleanPrompt) return
+    if (mode === 'image' && !imageFile) return
 
     setStatus('processing')
     setError(null)
@@ -83,17 +110,34 @@ function App() {
     setUpscaled(false)
 
     try {
-      const response = await fetch(apiUrl('/generate'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: cleanPrompt,
-          add_music: addMusic,
-          music_prompt: musicPrompt.trim() || undefined,
-          upscale,
-          upscale_factor: upscaleFactor,
-        }),
-      })
+      let response: Response
+
+      if (mode === 'text') {
+        response = await fetch(apiUrl('/generate'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: cleanPrompt,
+            add_music: addMusic,
+            music_prompt: musicPrompt.trim() || undefined,
+            upscale,
+            upscale_factor: upscaleFactor,
+          }),
+        })
+      } else {
+        const formData = new FormData()
+        if (imageFile) formData.append('file', imageFile)
+        if (cleanPrompt) formData.append('prompt', cleanPrompt)
+        formData.append('add_music', String(addMusic))
+        if (musicPrompt.trim()) formData.append('music_prompt', musicPrompt.trim())
+        formData.append('upscale', String(upscale))
+        formData.append('upscale_factor', upscaleFactor)
+
+        response = await fetch(apiUrl('/generate-from-image'), {
+          method: 'POST',
+          body: formData,
+        })
+      }
 
       if (!response.ok) {
         const message = await response.text()
@@ -145,24 +189,101 @@ function App() {
     return () => clearInterval(interval)
   }, [jobId, status])
 
+  const handleReset = () => {
+    setPrompt('')
+    setJobId(null)
+    setVideoUrl(null)
+    setStatus('idle')
+    setJobWarnings([])
+    setImageFile(null)
+    setImagePreview(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
+
   return (
     <div className="container">
       <header>
         <h1>QuickVid AI</h1>
-        <p className="subtitle">Generate social-ready AI videos from text prompts</p>
+        <p className="subtitle">Generate social-ready AI videos from text prompts or images</p>
       </header>
 
       <main>
         <section className="card">
-          <div className="input-group">
-            <label htmlFor="prompt">Describe your video</label>
-            <textarea
-              id="prompt"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="A golden retriever puppy playing in the snow, cinematic lighting..."
+          <div className="mode-toggle">
+            <button
+              className={`mode-btn ${mode === 'text' ? 'active' : ''}`}
+              onClick={() => setMode('text')}
               disabled={isGenerating}
-            />
+            >
+              📝 Text to Video
+            </button>
+            <button
+              className={`mode-btn ${mode === 'image' ? 'active' : ''}`}
+              onClick={() => setMode('image')}
+              disabled={isGenerating}
+            >
+              🖼️ Image to Video
+            </button>
+          </div>
+
+          <div className="input-group">
+            {mode === 'text' ? (
+              <>
+                <label htmlFor="prompt">Describe your video</label>
+                <textarea
+                  id="prompt"
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="A golden retriever puppy playing in the snow, cinematic lighting..."
+                  disabled={isGenerating}
+                />
+              </>
+            ) : (
+              <>
+                <label>Upload an image to animate</label>
+                <div className="image-upload-area">
+                  {imagePreview ? (
+                    <div className="image-preview-container">
+                      <img src={imagePreview} alt="Uploaded preview" className="image-preview" />
+                      <button
+                        type="button"
+                        className="clear-image-btn"
+                        onClick={handleClearImage}
+                        disabled={isGenerating}
+                      >
+                        ✕ Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      className="image-dropzone"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <p>Click to select an image</p>
+                      <p className="small">PNG, JPG, WebP, BMP supported</p>
+                    </div>
+                  )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".png,.jpg,.jpeg,.webp,.bmp"
+                    onChange={handleImageSelect}
+                    disabled={isGenerating}
+                    hidden
+                  />
+                </div>
+                <label htmlFor="prompt-img">Motion prompt (optional)</label>
+                <textarea
+                  id="prompt-img"
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="Describe the desired motion, e.g. 'A cat running in a park, cinematic style'"
+                  disabled={isGenerating}
+                />
+              </>
+            )}
 
             <div className="enhancements">
               <h4>Enhancements</h4>
@@ -210,8 +331,20 @@ function App() {
               )}
             </div>
 
-            <button className="generate-btn" onClick={handleGenerate} disabled={isGenerating || !prompt.trim()}>
-              {isGenerating ? 'Generating…' : 'Generate Video'}
+            <button
+              className="generate-btn"
+              onClick={handleGenerate}
+              disabled={
+                isGenerating ||
+                (mode === 'text' && !prompt.trim()) ||
+                (mode === 'image' && !imageFile)
+              }
+            >
+              {isGenerating
+                ? 'Generating…'
+                : mode === 'text'
+                  ? 'Generate Video'
+                  : 'Generate from Image'}
             </button>
           </div>
         </section>
@@ -256,16 +389,7 @@ function App() {
                 <a href={videoUrl} download={`quickvid-${jobId}.mp4`} className="download-link">
                   Download MP4
                 </a>
-                <button
-                  onClick={() => {
-                    setPrompt('')
-                    setJobId(null)
-                    setVideoUrl(null)
-                    setStatus('idle')
-                    setJobWarnings([])
-                  }}
-                  className="reset-btn"
-                >
+                <button onClick={handleReset} className="reset-btn">
                   Generate Another
                 </button>
               </div>
@@ -300,7 +424,7 @@ function App() {
       </main>
 
       <footer>
-        <p>Base engine: ByteDance/AnimateDiff-Lightning • Enhancements: MusicGen + RealESRGAN pipeline</p>
+        <p>Text-to-Video: ByteDance/AnimateDiff-Lightning • Image-to-Video: Wan2.1 • Enhancements: MusicGen + RealESRGAN</p>
       </footer>
     </div>
   )

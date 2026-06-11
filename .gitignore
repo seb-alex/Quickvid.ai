@@ -6,6 +6,7 @@ __pycache__/
 # Backend local env and runtime artifacts
 backend/venv/
 backend/static/videos/*.mp4
+backend/static/uploads/
 
 # Local exploratory artifacts
 backend/api_view*.txt
