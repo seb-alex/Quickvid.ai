@@ -9,8 +9,9 @@ import subprocess
 import tempfile
 import uuid
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from gradio_client import Client as GradioClient, handle_file
 from imageio_ffmpeg import get_ffmpeg_exe
@@ -27,6 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="QuickVid AI API")
+api_router = APIRouter()
 
 # Add CORS middleware
 app.add_middleware(
@@ -41,6 +43,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 VIDEO_DIR = STATIC_DIR / "videos"
 UPLOAD_DIR = STATIC_DIR / "uploads"
+FE_DIST = BASE_DIR.parent / "frontend" / "dist"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,6 +69,10 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "videos")
 MAX_LIST_LIMIT = 50
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Mount frontend dist for production SPA serving
+if FE_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(FE_DIST / "assets")), name="frontend_assets")
 
 
 class VideoRequest(BaseModel):
@@ -362,7 +369,7 @@ async def root() -> Dict[str, str]:
     return {"message": "Welcome to QuickVid AI API"}
 
 
-@app.post("/generate", response_model=VideoResponse)
+@api_router.post("/generate", response_model=VideoResponse)
 async def generate_video(
     request: VideoRequest, background_tasks: BackgroundTasks
 ) -> VideoResponse:
@@ -395,7 +402,7 @@ async def generate_video(
     return VideoResponse(job_id=job_id, status="processing", video_url=None)
 
 
-@app.post("/generate-from-image", response_model=VideoResponse)
+@api_router.post("/generate-from-image", response_model=VideoResponse)
 async def generate_video_from_image(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -451,7 +458,7 @@ async def generate_video_from_image(
     return VideoResponse(job_id=job_id, status="processing", video_url=None)
 
 
-@app.get("/status/{job_id}", response_model=VideoResponse)
+@api_router.get("/status/{job_id}", response_model=VideoResponse)
 async def get_status(job_id: str) -> VideoResponse:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -470,7 +477,7 @@ async def get_status(job_id: str) -> VideoResponse:
     )
 
 
-@app.get("/videos", response_model=VideoListResponse)
+@api_router.get("/videos", response_model=VideoListResponse)
 async def list_generated_videos(
     limit: int = Query(default=12, ge=1, le=MAX_LIST_LIMIT)
 ) -> VideoListResponse:
@@ -673,3 +680,34 @@ def process_image_video(
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# Register API routes (available at /api/*)
+app.include_router(api_router, prefix="/api")
+
+# Serve static root files from frontend dist
+@app.get("/favicon.svg")
+async def favicon():
+    return FileResponse(str(FE_DIST / "favicon.svg"))
+
+@app.get("/icons.svg")
+async def icons():
+    return FileResponse(str(FE_DIST / "icons.svg"))
+
+# SPA catch-all: serve index.html for any unmatched GET route (frontend routing)
+SPA_EXCLUDE_PREFIXES = ("api/", "static/", "assets/", "favicon", "icons")
+
+
+@app.get("/{full_path:path}", response_class=HTMLResponse)
+async def serve_frontend(full_path: str) -> str:
+    if full_path.startswith(SPA_EXCLUDE_PREFIXES):
+        raise HTTPException(status_code=404, detail="Not found")
+    index = FE_DIST / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=404, detail="Frontend not built")
+    return index.read_text()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=3000)
